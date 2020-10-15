@@ -7,4 +7,4 @@ RUN pip install -r requirements.txt
 ADD config-example.json /app/config-example.json
 ADD transformer.py /app/transformer.py
 
-CMD ["python", "transformer.py"]
+ENTRYPOINT ["python", "transformer.py", "$@"]
