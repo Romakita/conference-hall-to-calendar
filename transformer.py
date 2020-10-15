@@ -42,10 +42,10 @@ def parse_date(text):
 def print_date(date):
     return rfc3339.rfc3339(date)
 
-def get_events_of_conference(calendar, config):
+def get_events_of_conference(credentials, token, calendar, config):
     """Get all events of the given conference (that's to say events of the given calendar in the good time period)"""
     global logger
-    service = get_calendar_service()
+    service = get_calendar_service(credentials, token)
     all_events = []
     for period in config['dates']:
         logger.info("getting events of %s between %s and %s" %(calendar['id'], period['start'], period['end']))
@@ -64,26 +64,26 @@ def get_events_of_conference(calendar, config):
                 break
     return all_events
 
-def remove_previous_events(calendar, config):
+def remove_previous_events(credentials, token, calendar, config):
     """Remove all event from given calendar at conference dates"""
-    service = get_calendar_service()
-    previous = get_events_of_conference(calendar, config)
+    service = get_calendar_service(credentials, token)
+    previous = get_events_of_conference(credentials, token, calendar, config)
     logger.info("should remove %d events" % len(previous))
     for event in previous:
         service.events().delete(calendarId=calendar['id'], eventId=event['id']).execute()
         logger.debug("removed %s" % previous)
 
-def process_conference(conference, config):
+def process_conference(credentials, token, conference, config):
     """
     Process conference file to generate the Google Agenda and the needed entries
     """
     conference_name = conference['name']
-    calendar = get_or_create_calendar(conference_name, config)
+    calendar = get_or_create_calendar(credentials, token, conference_name, config)
     logger.info("Using calendar %s" % calendar )
     formats = conference['formats']
     # TODO maybe filter talks to remove rejected ones prior to sort them
     # First, clear all events at conference dates
-    remove_previous_events(calendar, config)
+    remove_previous_events(credentials, token, calendar, config)
     # And now, starting at start time, and until end time is elapsed, fill schedule with talks
     formats_map = improve_formats(conference['formats'])
     speakers_map = improve_speakers(conference['speakers'])
@@ -95,10 +95,10 @@ def process_conference(conference, config):
     # Sort talks and set the ones with no rating in last position
     purgeable_talks = sorted(talks, key=lambda talk: talk['rating'] or 0, reverse=True)
     for period in period_list:
-        create_events_in_period(calendar, period, purgeable_talks, config, formats_map, speakers_map)
+        create_events_in_period(credentials, token, calendar, period, purgeable_talks, config, formats_map, speakers_map)
     logger.info("All time slots are full, conference schedule is ready to be improved by hand at %s" % calendar['summary'])
 
-def create_events_in_period(calendar, period, purgeable_talks, config, formats_map, speakers_map):
+def create_events_in_period(credentials, token, calendar, period, purgeable_talks, config, formats_map, speakers_map):
     break_duration = None
     if config['break']:
         break_duration = timedelta(seconds=timeparse(config['break']))
@@ -130,7 +130,7 @@ def create_events_in_period(calendar, period, purgeable_talks, config, formats_m
             if t['dates']['start']>conference_end:
                 logger.debug("conference period %s is full!" % period)
                 return
-        next_event = create_event_for(t, calendar, config, previous_event, period)
+        next_event = create_event_for(credentials, token, t, calendar, config, previous_event, period)
         purgeable_talks.pop(0)
         previous_event = next_event
         # added event triggers a log usable to build full calendar
@@ -171,10 +171,12 @@ def improve_formats(formats):
         returned[f['id']]=timedelta(seconds=timeparse(f["name"]))
     return returned
 
-def create_event_for(talk, calendar, config, previous_event, period):
+def create_event_for(credentials, token, talk, calendar, config, previous_event, period):
     """
     Creates an event for the given talk
     
+    :param credentials: Google API credentials
+    :param token: Google API token
     :param talk: the talk JSON fragment, as obtained from conference-hall export. 
     Notice it should an improved json object, with duration replaced with a timedelta, 
     and speakers ids replaced with speakers objects
@@ -185,7 +187,7 @@ def create_event_for(talk, calendar, config, previous_event, period):
     :return: the newly created event object, as returned from Google Calendar
     """
     logger.debug("adding an event for %s" % talk['title'])
-    service = get_calendar_service()
+    service = get_calendar_service(credentials, token)
 
     summary = talk['title']
     if 'prefix' in period:
@@ -221,7 +223,7 @@ def create_event_description(talk, config):
     returned += talk['abstract']
     return returned
 
-def get_calendar_service():
+def get_calendar_service(credentials, token):
     """
     Obtain the calendar service from Google
     """
@@ -232,30 +234,30 @@ def get_calendar_service():
         # The file token.pickle stores the user's access and refresh tokens, and is
         # created automatically when the authorization flow completes for the first
         # time.
-        if os.path.exists('token.pickle'):
-            with open('token.pickle', 'rb') as token:
-                creds = pickle.load(token)
+        if os.path.exists(token):
+            with open(token, 'rb') as tokenStream:
+                creds = pickle.load(tokenStream)
         # If there are no (valid) credentials available, let the user log in.
         if not creds or not creds.valid:
             if creds and creds.expired and creds.refresh_token:
                 creds.refresh(Request())
             else:
                 flow = InstalledAppFlow.from_client_secrets_file(
-                    'credentials.json', SCOPES)
+                    credentials, SCOPES)
                 flow.user_agent = APPLICATION_NAME
                 creds = flow.run_local_server()
             # Save the credentials for the next run
-            with open('token.pickle', 'wb') as token:
-                pickle.dump(creds, token)
+            with open(token, 'wb') as tokenStream:
+                pickle.dump(creds, tokenStream)
 
         SERVICE = build('calendar', 'v3', credentials=creds)
         logger.info("Google calendar service created")
     return SERVICE
 
-def get_or_create_calendar(conference, config):
+def get_or_create_calendar(credentials, token, conference, config):
     """Create secondary calendar having as summary the given text
     """
-    service = get_calendar_service()
+    service = get_calendar_service(credentials, token)
 
     # This code is to fetch the calendar ids shared with me
     # Src: https://developers.google.com/google-apps/calendar/v3/reference/calendarList/list
@@ -285,6 +287,16 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description="A simple Python tool that fill a Google Calendar from a conference-hall export file"
     )
+    parser.add_argument('--credentials',
+        required = False,
+        default = 'credentials.json',
+        help = 'Google API credentials definition file')
+
+    parser.add_argument('--token',
+        required = False,
+        default = 'token.pickle',
+        help = 'Token file storing Google API credentials when they are activated on application (it avoids the need to open browser each time script has to run)')
+
     parser.add_argument('--input',
         required = False,
         default = 'export.json',
@@ -296,4 +308,4 @@ if __name__ == '__main__':
         help = 'Additional configuration elements that are missing from conference-hall export')
 
     args = parser.parse_args()
-    process_conference(parse_json(args.input), parse_json(args.configuration))
+    process_conference(args.credentials, args.token, parse_json(args.input), parse_json(args.configuration))
